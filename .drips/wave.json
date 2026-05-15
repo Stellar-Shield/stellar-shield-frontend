@@ -1,0 +1,55 @@
+{
+  "name": "StellarShield Security Wave",
+  "description": "Rewards contributors who add new Guard modules, fix security issues, or improve the StellarShield ecosystem.",
+  "rewardAddress": "",
+  "network": "testnet",
+  "repos": [
+    "stellar-shield-contract",
+    "stellar-shield-backend",
+    "stellar-shield-frontend"
+  ],
+  "contributionTypes": [
+    {
+      "id": "new_guard_module",
+      "label": "New Guard Module",
+      "description": "Add a new security module (e.g. time_delay_guard.rs, ip_lock_guard.rs)",
+      "points": 500
+    },
+    {
+      "id": "secp256r1_verify",
+      "label": "Wire P-256 Verification",
+      "description": "Implement real secp256r1_verify in auth.rs using Soroban host functions",
+      "points": 400
+    },
+    {
+      "id": "token_transfer",
+      "label": "Token Transfer Integration",
+      "description": "Invoke the XLM token contract transfer in guard.rs after velocity check passes",
+      "points": 400
+    },
+    {
+      "id": "event_indexer",
+      "label": "Event Indexer",
+      "description": "Index execute_transfer and add_trusted_drip contract events into a persistent DB",
+      "points": 300
+    },
+    {
+      "id": "webauthn_full_verify",
+      "label": "Full WebAuthn Verification",
+      "description": "Implement full authenticatorData + clientDataJSON verification in backend/routes/auth.ts",
+      "points": 300
+    },
+    {
+      "id": "tests",
+      "label": "Contract Tests",
+      "description": "Add soroban-sdk testutils test suite for any contract",
+      "points": 200
+    },
+    {
+      "id": "bug_fix",
+      "label": "Bug Fix",
+      "description": "Fix a confirmed bug in any repo",
+      "points": 100
+    }
+  ]
+}

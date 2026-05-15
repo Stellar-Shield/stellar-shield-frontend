@@ -1,0 +1,20 @@
+{
+  "comment": "Reward split percentages. Must sum to 100. Update as contributors join.",
+  "splits": [
+    {
+      "address": "",
+      "label": "Project maintainer",
+      "percent": 50
+    },
+    {
+      "address": "",
+      "label": "Contributor pool (distributed by points)",
+      "percent": 40
+    },
+    {
+      "address": "",
+      "label": "Drips protocol fee",
+      "percent": 10
+    }
+  ]
+}
