@@ -51,13 +51,68 @@ async function assemble(tx: ReturnType<ReturnType<typeof buildTx>["build"]>) {
   return sorobanRpc.assembleTransaction(tx, sim).build();
 }
 
-/** Simulate a read-only call and return its native value. */
-async function read<T>(source: Source, op: ReturnType<Contract["call"]>, fallback: T): Promise<T> {
+/**
+ * A source account for a read.
+ *
+ * Simulation never submits, so the sequence number is not consulted and this
+ * does not need a network round trip. It exists so a read does not require the
+ * caller to have fetched an account first -- and so reading someone else's
+ * limit does not require their account at all.
+ */
+export const readSource = (address: string): Source => new Account(address, "0");
+
+/**
+ * Simulate a read-only call and return its native value.
+ *
+ * A simulation error is raised, not swallowed. The previous version returned a
+ * fallback, which meant an RPC outage read as `limit_of -> null` -- and null
+ * means "no limit set", so a network problem displayed as an unguarded account.
+ * That is the same fail-open the contract and the backend both had. An absent
+ * value is still a legitimate answer; a failure to ask is not.
+ */
+async function read<T>(source: Source, op: ReturnType<Contract["call"]>, absent: T): Promise<T> {
   const tx = buildTx(source).addOperation(op).build();
   const sim = await rpc.simulateTransaction(tx);
-  if (sorobanRpc.Api.isSimulationError(sim)) return fallback;
+  if (sorobanRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Soroban RPC could not answer: ${sim.error}`);
+  }
   const retval = (sim as sorobanRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-  return retval ? (scValToNative(retval) as T) : fallback;
+  return retval ? (scValToNative(retval) as T) : absent;
+}
+
+/**
+ * Submit a signed transaction to Soroban RPC and wait for it to land.
+ *
+ * This used to be POSTed to our own backend, which forwarded it to the same
+ * public RPC. There is nothing a server can add here: the transaction is
+ * already signed, the RPC is public and sends CORS headers, and routing it
+ * through a server only adds something that can be down, and someone who could
+ * drop the transaction on the floor. The browser talks to the network.
+ */
+export async function submit(signedXdr: string): Promise<{ hash: string; status: string }> {
+  const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+  const sent = await rpc.sendTransaction(tx);
+
+  if (sent.status !== "PENDING") {
+    // errorResult carries the reason the network refused it outright.
+    const why = sent.errorResult ? `: ${sent.errorResult.result().switch().name}` : "";
+    throw new Error(`The network refused the transaction (${sent.status})${why}`);
+  }
+
+  const deadline = Date.now() + 40_000;
+  let got = await rpc.getTransaction(sent.hash);
+  while (got.status === sorobanRpc.Api.GetTransactionStatus.NOT_FOUND && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1500));
+    got = await rpc.getTransaction(sent.hash);
+  }
+
+  if (got.status === sorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+    throw new Error(`Transaction ${sent.hash} was accepted but has not landed yet.`);
+  }
+  if (got.status !== sorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+    throw new Error(`Transaction ${sent.hash} failed on chain (${got.status}).`);
+  }
+  return { hash: sent.hash, status: got.status };
 }
 
 // -- GuardContract ------------------------------------------------------------

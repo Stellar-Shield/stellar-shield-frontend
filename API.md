@@ -14,6 +14,29 @@ single endpoint. None of these calls could ever have reached the other side:
 
 The table below is now the agreed shape. Both repos carry this file.
 
+## What still goes through the backend, and what does not
+
+Only the WebAuthn endpoints do. A challenge has to be issued and spent
+server-side, because the whole point of it is that the client did not choose
+it, so that half needs a service with storage.
+
+Everything else was a server standing between the browser and a public,
+CORS-enabled Soroban RPC, forwarding calls verbatim:
+
+| call | was | is |
+| --- | --- | --- |
+| velocity | `GET /guard/velocity` -> backend simulates `limit_of` + `spent_today` | browser simulates them directly |
+| drips | `GET /registry/drips?address=` -> backend simulates `is_trusted_drip` | browser simulates it directly |
+| relay | `POST /tx/relay` with a signed envelope -> backend forwards to RPC | browser submits to RPC and waits for the result |
+
+A limit is public on-chain state and a signed transaction is already signed, so
+the server could not add authority to either. It could only be down, or drop
+the transaction. The frontend now works with `BACKEND_URL` unset; the proxy
+returns a 503 saying passkeys are unavailable, and nothing else is affected.
+
+The routes below still exist and are still the contract for anyone who wants
+to use them -- a native client with no browser RPC access, for instance.
+
 ## POST /auth/challenge
 
 Request `{ "userId": "G..." }` → `{ "challenge": "<base64url, 32 bytes>" }`

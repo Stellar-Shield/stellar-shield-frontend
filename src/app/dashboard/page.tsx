@@ -5,9 +5,8 @@ import { useVelocity } from "@/hooks/useVelocity";
 import VelocityGauge from "@/components/VelocityGauge";
 import DripList from "@/components/DripList";
 import AuthModal from "@/components/AuthModal";
-import { buildSetLimit, buildExecuteTransfer, rpc } from "@/lib/soroban";
+import { buildSetLimit, buildExecuteTransfer, rpc, submit } from "@/lib/soroban";
 import { contractsConfigured, toStroops } from "@/lib/constants";
-import { relayTransaction } from "@/lib/api";
 
 export default function DashboardPage() {
   const wallet = useWallet();
@@ -36,13 +35,21 @@ export default function DashboardPage() {
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
-  async function signAndRelay(xdr: string) {
+  /**
+   * Sign in the wallet, submit to the network, wait for it to land.
+   *
+   * The signed envelope used to be POSTed to our backend, which forwarded it to
+   * the same public Soroban RPC. It goes straight there now: the transaction is
+   * already signed, so a server in the middle adds nothing but something that
+   * can be down and someone who could drop it. `submit` waits for the result,
+   * so a transaction that fails on chain reports as failed rather than as
+   * "Submitted." and a gauge that silently never moves.
+   */
+  async function signAndSubmit(xdr: string) {
     const signed = await wallet.sign(xdr);
-    const { result } = await relayTransaction(signed);
-    // The relay returns whatever Soroban RPC said. Show the hash when there is
-    // one rather than printing "undefined — undefined", which is what reading
-    // fields the response never had used to produce.
-    setTxStatus(result?.hash ? `${result.status ?? "submitted"} — ${result.hash}` : "Submitted.");
+    setTxStatus("Waiting for the network…");
+    const { hash, status } = await submit(signed);
+    setTxStatus(`${status} — ${hash}`);
     velocity.refresh();
   }
 
@@ -51,7 +58,7 @@ export default function DashboardPage() {
     await attempt("Setting the limit", async () => {
       const account = await rpc.getAccount(wallet.publicKey!);
       const tx = await buildSetLimit(account, wallet.publicKey!, toStroops(limitInput));
-      await signAndRelay(tx.toXDR());
+      await signAndSubmit(tx.toXDR());
     });
   }
 
@@ -65,7 +72,7 @@ export default function DashboardPage() {
         toInput,
         toStroops(amountInput),
       );
-      await signAndRelay(tx.toXDR());
+      await signAndSubmit(tx.toXDR());
     });
   }
 

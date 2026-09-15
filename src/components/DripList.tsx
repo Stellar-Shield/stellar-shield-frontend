@@ -4,13 +4,13 @@
  *
  * This was a list of trusted drips. It could not have worked: the registry
  * contract stores a boolean per address, and Soroban has no way to enumerate
- * storage keys, so there is nothing to list. The backend route it called takes
- * one address and answers yes or no. This asks the question the system can
- * actually answer.
+ * storage keys, so there is nothing to list. The registry answers one address
+ * at a time, yes or no. This asks the question the system can actually answer,
+ * and asks the contract rather than a server that would ask the contract.
  */
 import { useState } from "react";
 
-import { checkDrip } from "@/lib/api";
+import { isTrustedDrip, readSource } from "@/lib/soroban";
 
 export default function DripList() {
   const [address, setAddress] = useState("");
@@ -25,7 +25,10 @@ export default function DripList() {
     setError(null);
     setResult(null);
     try {
-      setResult(await checkDrip(trimmed));
+      // Read the registry directly. The answer is public on-chain state; it
+      // does not need a server, and a server here could only be wrong.
+      const trusted = await isTrustedDrip(readSource(trimmed), trimmed);
+      setResult({ address: trimmed, trusted });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

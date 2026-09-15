@@ -1,8 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 
-import { getVelocity } from "@/lib/api";
 import { fromStroops, stroopsToApproxXlm } from "@/lib/constants";
+import { getLimit, getSpentToday, readSource } from "@/lib/soroban";
 
 export interface VelocityData {
   /** Exact, for display and arithmetic. */
@@ -20,12 +20,16 @@ export interface VelocityData {
 }
 
 /**
- * Balances are held as stroops, not as numbers.
+ * The user's cap and today's spend, read from the chain.
  *
- * This hook used to convert straight to a float for display, which is fine for
- * a gauge and wrong for a balance: a double cannot hold every stroop value, so
- * larger amounts stop round-tripping. The only float here is the percentage,
- * which is a bar width and nothing else.
+ * Two things changed here. Balances are held as stroops rather than floats: a
+ * double cannot represent every stroop value, so larger amounts stopped
+ * round-tripping. The only float left is the percentage, which is a bar width.
+ *
+ * And the read goes straight to Soroban RPC. It used to go to our backend,
+ * which simulated the same two calls against the same public RPC and handed
+ * back the same numbers. The limit lives on chain and anyone can read it; a
+ * server in the middle could only be down, or lie.
  */
 export function useVelocity(user: string | null): VelocityData {
   const [limitStroops, setLimitStroops] = useState<bigint | null>(null);
@@ -39,25 +43,33 @@ export function useVelocity(user: string | null): VelocityData {
     let live = true;
     setLoading(true);
     setError(null);
-    getVelocity(user)
-      .then(({ limitStroops: l, spentStroops: s }) => {
+
+    const source = readSource(user);
+    Promise.all([getLimit(source, user), getSpentToday(source, user)])
+      .then(([limit, spent]) => {
         if (!live) return;
-        setLimitStroops(l === null || l === "" ? null : BigInt(l));
-        setSpentStroops(BigInt(s || "0"));
+        setLimitStroops(limit);
+        setSpentStroops(spent);
       })
       .catch((e: unknown) => {
-        if (live) setError(e instanceof Error ? e.message : String(e));
+        if (!live) return;
+        // Show nothing rather than a stale or invented figure. A failed read is
+        // not the same as "no limit", and must not render as an open account.
+        setLimitStroops(null);
+        setSpentStroops(0n);
+        setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
         if (live) setLoading(false);
       });
+
     // Avoid a slow response for the previous account landing after a switch.
     return () => {
       live = false;
     };
   }, [user, tick]);
 
-  const guarded = limitStroops !== null && limitStroops > 0n;
+  const guarded = error === null && limitStroops !== null && limitStroops > 0n;
   const remaining =
     limitStroops !== null && limitStroops > spentStroops ? limitStroops - spentStroops : 0n;
 
