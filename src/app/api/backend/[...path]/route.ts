@@ -1,5 +1,5 @@
 /**
- * Catch-all proxy: /api/backend/[...path] → BACKEND_URL/[...path]
+ * Catch-all proxy: /api/backend/[...path] -> BACKEND_URL/[...path]
  * Keeps BACKEND_URL server-side; the browser never sees it.
  */
 import { type NextRequest, NextResponse } from "next/server";
@@ -7,15 +7,15 @@ import { type NextRequest, NextResponse } from "next/server";
 /**
  * Unset in production means "there is no passkey service", not localhost.
  *
- * Defaulting to localhost on a deployed instance produced a connection refused
- * from inside the serverless function and a 500 with no explanation. Only the
+ * There is no localhost default. A deployed build fell back to it and answered
+ * ECONNREFUSED 127.0.0.1:3001 from inside the serverless function -- a default
+ * that is only ever right on the machine it was written on. Set BACKEND_URL in
+ * .env.local for local work. Only the
  * WebAuthn endpoints come through here now -- reads and submissions go straight
  * to Soroban RPC from the browser -- so an unset BACKEND_URL is a supported
  * configuration and should say so.
  */
-const BACKEND =
-  process.env.BACKEND_URL ??
-  (process.env.NODE_ENV === "production" ? "" : "http://localhost:3001");
+const BACKEND = process.env.BACKEND_URL ?? "";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   return proxy(req, await params);
@@ -30,6 +30,19 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ p
   return proxy(req, await params);
 }
 
+/**
+ * Only the headers that mean something to the backend are forwarded.
+ *
+ * This used to copy the whole incoming Headers object and stream `req.body`
+ * with duplex: "half". That sends the browser's `content-length`,
+ * `accept-encoding`, `connection` and Vercel's own `x-forwarded-*` upstream,
+ * and a content-length that no longer matches a re-encoded body makes fetch
+ * throw -- so every proxied call answered 500 before it reached the backend.
+ * Reading the body to a string and declaring only what we mean also avoids
+ * the streaming path entirely; these requests are a few hundred bytes.
+ */
+const FORWARD = ["content-type", "authorization", "accept"];
+
 async function proxy(req: NextRequest, params: { path: string[] }) {
   if (!BACKEND) {
     return NextResponse.json(
@@ -42,23 +55,41 @@ async function proxy(req: NextRequest, params: { path: string[] }) {
     );
   }
 
-  const tail = params.path.join("/");
-  const search = req.nextUrl.search;
-  const url = `${BACKEND}/${tail}${search}`;
+  const url = `${BACKEND}/${params.path.join("/")}${req.nextUrl.search}`;
 
-  const headers = new Headers(req.headers);
-  headers.delete("host");
+  const headers = new Headers();
+  for (const name of FORWARD) {
+    const value = req.headers.get(name);
+    if (value) headers.set(name, value);
+  }
 
-  const upstream = await fetch(url, {
-    method: req.method,
-    headers,
-    body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
-    // @ts-expect-error — Node 18+ fetch supports duplex
-    duplex: "half",
-  });
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  const body = hasBody ? await req.text() : undefined;
 
-  return new NextResponse(upstream.body, {
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { method: req.method, headers, body });
+  } catch (e) {
+    // A backend that is down is a 502 from the proxy, not a 500 from us.
+    return NextResponse.json(
+      { error: `Could not reach the backend at ${BACKEND}: ${detail(e)}` },
+      { status: 502 },
+    );
+  }
+
+  // Pass the body through as text. Copying upstream's content-encoding and
+  // content-length alongside a body fetch has already decoded produces a
+  // response the browser cannot read.
+  const text = await upstream.text();
+  return new NextResponse(text, {
     status: upstream.status,
-    headers: upstream.headers,
+    headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
   });
+}
+
+/** fetch() wraps the real reason in `cause`; without it every failure is "fetch failed". */
+function detail(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const cause = (e as { cause?: unknown }).cause;
+  return cause ? `${e.message}: ${cause instanceof Error ? cause.message : String(cause)}` : e.message;
 }
