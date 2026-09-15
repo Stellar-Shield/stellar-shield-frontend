@@ -1,119 +1,151 @@
 /**
- * Thin wrappers around @stellar/stellar-sdk for the three StellarShield contracts.
- * All amounts are in stroops (bigint) at this layer; convert at the UI boundary.
+ * Thin wrappers around @stellar/stellar-sdk for the three StellarShield
+ * contracts. Amounts are stroops (bigint) at this layer; convert at the UI edge.
  */
 import {
-  Contract,
-  Networks,
-  SorobanRpc,
-  TransactionBuilder,
-  BASE_FEE,
-  nativeToScVal,
+  Account,
   Address,
-  xdr,
+  BASE_FEE,
+  Contract,
+  rpc as sorobanRpc,
+  TransactionBuilder,
+  nativeToScVal,
+  scValToNative,
 } from "@stellar/stellar-sdk";
-import { CONTRACT_IDS, NETWORK_PASSPHRASE, SOROBAN_RPC_URL } from "./constants";
 
-export const rpc = new SorobanRpc.Server(SOROBAN_RPC_URL, { allowHttp: false });
+import { NETWORK_PASSPHRASE, SOROBAN_RPC_URL, contractId } from "./constants";
 
-const networkPassphrase = NETWORK_PASSPHRASE;
+export const rpc = new sorobanRpc.Server(SOROBAN_RPC_URL, { allowHttp: false });
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+/** The source account a transaction is built on. */
+export type Source = Account;
 
-async function simulate(tx: ReturnType<TransactionBuilder["build"]>) {
-  const sim = await rpc.simulateTransaction(tx);
-  if (SorobanRpc.Api.isSimulationError(sim)) throw new Error(sim.error);
-  return sim;
-}
+// -- helpers ------------------------------------------------------------------
 
-function buildTx(sourceAccount: Parameters<typeof TransactionBuilder>[0]) {
-  return new TransactionBuilder(sourceAccount, {
+function buildTx(source: Source) {
+  return new TransactionBuilder(source, {
     fee: BASE_FEE,
-    networkPassphrase,
+    networkPassphrase: NETWORK_PASSPHRASE,
   }).setTimeout(30);
 }
 
-// ── GuardContract ─────────────────────────────────────────────────────────────
-
-const guard = new Contract(CONTRACT_IDS.guard);
-
-/** Simulate set_limit — returns the assembled tx for wallet signing */
-export async function buildSetLimit(
-  sourceAccount: Parameters<typeof TransactionBuilder>[0],
-  user: string,
-  limitStroops: bigint
-) {
-  const tx = buildTx(sourceAccount)
-    .addOperation(
-      guard.call(
-        "set_limit",
-        new Address(user).toScVal(),
-        nativeToScVal(limitStroops, { type: "i128" })
-      )
-    )
-    .build();
-  const sim = await simulate(tx);
-  return SorobanRpc.assembleTransaction(tx, sim).build();
+async function simulate(tx: ReturnType<ReturnType<typeof buildTx>["build"]>) {
+  const sim = await rpc.simulateTransaction(tx);
+  if (sorobanRpc.Api.isSimulationError(sim)) throw new Error(sim.error);
+  return sim;
 }
 
-/** Simulate execute_transfer — returns the assembled tx for wallet signing */
+/**
+ * Contracts are built on demand, not at module scope.
+ *
+ * `new Contract("")` throws, and at module scope that throw happened during
+ * import -- so with the env vars unset the dashboard died on load with a stack
+ * trace about an invalid contract id, instead of telling anyone what to set.
+ */
+const guard = () => new Contract(contractId("guard"));
+const registry = () => new Contract(contractId("registry"));
+const auth = () => new Contract(contractId("auth"));
+
+async function assemble(tx: ReturnType<ReturnType<typeof buildTx>["build"]>) {
+  const sim = await simulate(tx);
+  return sorobanRpc.assembleTransaction(tx, sim).build();
+}
+
+/** Simulate a read-only call and return its native value. */
+async function read<T>(source: Source, op: ReturnType<Contract["call"]>, fallback: T): Promise<T> {
+  const tx = buildTx(source).addOperation(op).build();
+  const sim = await rpc.simulateTransaction(tx);
+  if (sorobanRpc.Api.isSimulationError(sim)) return fallback;
+  const retval = (sim as sorobanRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  return retval ? (scValToNative(retval) as T) : fallback;
+}
+
+// -- GuardContract ------------------------------------------------------------
+
+export async function buildSetLimit(source: Source, user: string, limitStroops: bigint) {
+  return assemble(
+    buildTx(source)
+      .addOperation(
+        guard().call(
+          "set_limit",
+          new Address(user).toScVal(),
+          nativeToScVal(limitStroops, { type: "i128" }),
+        ),
+      )
+      .build(),
+  );
+}
+
+/**
+ * The guard takes the registry address explicitly.
+ *
+ * It used to read its own storage for a whitelist that only the registry
+ * contract ever wrote, so no exemption ever applied. Passing the address also
+ * means a deployment cannot be quietly pointed at a registry nobody audited.
+ */
 export async function buildExecuteTransfer(
-  sourceAccount: Parameters<typeof TransactionBuilder>[0],
+  source: Source,
   user: string,
   to: string,
-  amountStroops: bigint
+  amountStroops: bigint,
 ) {
-  const tx = buildTx(sourceAccount)
-    .addOperation(
-      guard.call(
-        "execute_transfer",
-        new Address(user).toScVal(),
-        new Address(to).toScVal(),
-        nativeToScVal(amountStroops, { type: "i128" })
+  return assemble(
+    buildTx(source)
+      .addOperation(
+        guard().call(
+          "execute_transfer",
+          new Address(user).toScVal(),
+          new Address(contractId("registry")).toScVal(),
+          new Address(to).toScVal(),
+          nativeToScVal(amountStroops, { type: "i128" }),
+        ),
       )
-    )
-    .build();
-  const sim = await simulate(tx);
-  return SorobanRpc.assembleTransaction(tx, sim).build();
+      .build(),
+  );
 }
 
-// ── RegistryContract ──────────────────────────────────────────────────────────
-
-const registry = new Contract(CONTRACT_IDS.registry);
-
-export async function isTrustedDrip(address: string): Promise<boolean> {
-  const account = await rpc.getAccount(address);
-  const tx = buildTx(account)
-    .addOperation(
-      registry.call("is_trusted_drip", new Address(address).toScVal())
-    )
-    .build();
-  const sim = await rpc.simulateTransaction(tx);
-  if (SorobanRpc.Api.isSimulationError(sim)) return false;
-  const result = (sim as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-    .result?.retval;
-  return result ? xdr.ScVal.fromXDR(result.toXDR()).b() : false;
+export async function getLimit(source: Source, user: string): Promise<bigint | null> {
+  return read<bigint | null>(
+    source,
+    guard().call("limit_of", new Address(user).toScVal()),
+    null,
+  );
 }
 
-// ── AuthContract ──────────────────────────────────────────────────────────────
+export async function getSpentToday(source: Source, user: string): Promise<bigint> {
+  return read<bigint>(source, guard().call("spent_today", new Address(user).toScVal()), 0n);
+}
 
-const auth = new Contract(CONTRACT_IDS.auth);
+// -- RegistryContract ---------------------------------------------------------
 
-/** Build register_key tx — pubkey is 65-byte uncompressed SEC1 point */
-export async function buildRegisterKey(
-  sourceAccount: Parameters<typeof TransactionBuilder>[0],
-  user: string,
-  pubkey: Uint8Array
-) {
-  const tx = buildTx(sourceAccount)
-    .addOperation(
-      auth.call(
-        "register_key",
-        new Address(user).toScVal(),
-        nativeToScVal(pubkey, { type: "bytes" })
+export async function isTrustedDrip(source: Source, address: string): Promise<boolean> {
+  return read<boolean>(
+    source,
+    registry().call("is_trusted_drip", new Address(address).toScVal()),
+    false,
+  );
+}
+
+// -- AuthContract -------------------------------------------------------------
+
+/** pubkey is the 65-byte uncompressed SEC1 point. */
+export async function buildRegisterKey(source: Source, user: string, pubkey: Uint8Array) {
+  if (pubkey.length !== 65) {
+    throw new Error(`A P-256 public key is 65 bytes uncompressed, got ${pubkey.length}`);
+  }
+  return assemble(
+    buildTx(source)
+      .addOperation(
+        auth().call(
+          "register_key",
+          new Address(user).toScVal(),
+          nativeToScVal(Buffer.from(pubkey), { type: "bytes" }),
+        ),
       )
-    )
-    .build();
-  const sim = await simulate(tx);
-  return SorobanRpc.assembleTransaction(tx, sim).build();
+      .build(),
+  );
+}
+
+export async function hasKey(source: Source, user: string): Promise<boolean> {
+  return read<boolean>(source, auth().call("has_key", new Address(user).toScVal()), false);
 }

@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: it typechecks, tests and builds
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      # Next only typechecks during build, and the build used to stop at the
+      # first error, so later ones stayed hidden. Run tsc over everything first.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

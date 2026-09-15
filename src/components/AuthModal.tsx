@@ -8,7 +8,8 @@ import { usePasskey } from "@/hooks/usePasskey";
 
 interface Props {
   userId: string;
-  onSuccess: (compactSig: string, message: string) => void;
+  /** (64-byte compact r||s as hex, the challenge that was signed) */
+  onSuccess: (compactSignature: string, challenge: string) => void;
   onClose: () => void;
 }
 
@@ -21,8 +22,8 @@ export default function AuthModal({ userId, onSuccess, onClose }: Props) {
     setStatus("pending");
     setErrorMsg("");
     try {
-      const { compactSig, message } = await assert();
-      onSuccess(compactSig, message);
+      const { compactSignature, challenge } = await assert();
+      onSuccess(compactSignature, challenge);
     } catch (e: unknown) {
       setStatus("error");
       setErrorMsg(e instanceof Error ? e.message : String(e));

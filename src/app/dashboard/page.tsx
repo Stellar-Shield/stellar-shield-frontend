@@ -6,7 +6,7 @@ import VelocityGauge from "@/components/VelocityGauge";
 import DripList from "@/components/DripList";
 import AuthModal from "@/components/AuthModal";
 import { buildSetLimit, buildExecuteTransfer, rpc } from "@/lib/soroban";
-import { toStroops } from "@/lib/constants";
+import { contractsConfigured, toStroops } from "@/lib/constants";
 import { relayTransaction } from "@/lib/api";
 
 export default function DashboardPage() {
@@ -18,33 +18,55 @@ export default function DashboardPage() {
   const [toInput, setToInput] = useState("");
   const [amountInput, setAmountInput] = useState("");
   const [txStatus, setTxStatus] = useState("");
+  const [txError, setTxError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  /** Run a chain action, and put the failure on screen instead of the console. */
+  async function attempt(what: string, fn: () => Promise<void>) {
+    setBusy(true);
+    setTxError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setTxError(`${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
   async function signAndRelay(xdr: string) {
     const signed = await wallet.sign(xdr);
-    const { hash, status } = await relayTransaction({ signedXdr: signed });
-    setTxStatus(`${status} — ${hash}`);
+    const { result } = await relayTransaction(signed);
+    // The relay returns whatever Soroban RPC said. Show the hash when there is
+    // one rather than printing "undefined — undefined", which is what reading
+    // fields the response never had used to produce.
+    setTxStatus(result?.hash ? `${result.status ?? "submitted"} — ${result.hash}` : "Submitted.");
     velocity.refresh();
   }
 
   async function handleSetLimit() {
     if (!wallet.publicKey) return;
-    const account = await rpc.getAccount(wallet.publicKey);
-    const tx = await buildSetLimit(account, wallet.publicKey, toStroops(Number(limitInput)));
-    await signAndRelay(tx.toXDR());
+    await attempt("Setting the limit", async () => {
+      const account = await rpc.getAccount(wallet.publicKey!);
+      const tx = await buildSetLimit(account, wallet.publicKey!, toStroops(limitInput));
+      await signAndRelay(tx.toXDR());
+    });
   }
 
   async function handleTransfer() {
     if (!wallet.publicKey) return;
-    const account = await rpc.getAccount(wallet.publicKey);
-    const tx = await buildExecuteTransfer(
-      account,
-      wallet.publicKey,
-      toInput,
-      toStroops(Number(amountInput))
-    );
-    await signAndRelay(tx.toXDR());
+    await attempt("The transfer", async () => {
+      const account = await rpc.getAccount(wallet.publicKey!);
+      const tx = await buildExecuteTransfer(
+        account,
+        wallet.publicKey!,
+        toInput,
+        toStroops(amountInput),
+      );
+      await signAndRelay(tx.toXDR());
+    });
   }
 
   // ── render ─────────────────────────────────────────────────────────────────
@@ -54,8 +76,18 @@ export default function DashboardPage() {
       <main style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 80 }}>
         <h1 style={{ fontSize: 28, marginBottom: 8 }}>🛡 StellarShield</h1>
         <p style={{ color: "#94a3b8", marginBottom: 24 }}>Connect your Freighter wallet to continue.</p>
+        {!contractsConfigured() && (
+          <p style={{ color: "#f59e0b", fontSize: 13, maxWidth: 420, textAlign: "center", marginBottom: 16 }}>
+            The contract ids are not set. Deploy the contracts and put them in
+            .env.local, or the dashboard will connect and then fail on every action.
+          </p>
+        )}
+        {wallet.error && (
+          <p role="alert" style={{ color: "#ef4444", fontSize: 13, marginBottom: 16 }}>{wallet.error}</p>
+        )}
         <button
-          onClick={wallet.connect}
+          disabled={wallet.connecting}
+          onClick={() => { void wallet.connect(); }}
           style={{
             padding: "10px 28px",
             background: "#6366f1",
@@ -66,7 +98,7 @@ export default function DashboardPage() {
             fontSize: 15,
           }}
         >
-          Connect Freighter
+          {wallet.connecting ? "Connecting…" : "Connect Freighter"}
         </button>
       </main>
     );
@@ -87,6 +119,7 @@ export default function DashboardPage() {
           spentXlm={velocity.spentXlm}
           limitXlm={velocity.limitXlm}
           pctUsed={velocity.pctUsed}
+          guarded={velocity.guarded}
         />
       </section>
 
@@ -103,7 +136,7 @@ export default function DashboardPage() {
             style={inputStyle}
             aria-label="Daily limit in XLM"
           />
-          <button onClick={handleSetLimit} style={btnStyle}>Set</button>
+          <button onClick={handleSetLimit} disabled={busy} style={btnStyle}>Set</button>
         </div>
       </section>
 
@@ -129,7 +162,7 @@ export default function DashboardPage() {
               style={inputStyle}
               aria-label="Amount in XLM"
             />
-            <button onClick={handleTransfer} style={btnStyle}>Send</button>
+            <button onClick={handleTransfer} disabled={busy} style={btnStyle}>Send</button>
           </div>
         </div>
       </section>
@@ -143,6 +176,16 @@ export default function DashboardPage() {
           🔐 Verify with Passkey
         </button>
       </section>
+
+      {txError && (
+        <p role="alert" style={{ color: "#ef4444", fontSize: 13, marginBottom: 16 }}>{txError}</p>
+      )}
+
+      {velocity.error && (
+        <p role="alert" style={{ color: "#ef4444", fontSize: 13, marginBottom: 16 }}>
+          Could not read your limit: {velocity.error}
+        </p>
+      )}
 
       {txStatus && (
         <p style={{ color: "#94a3b8", fontSize: 12, fontFamily: "monospace", marginBottom: 24 }}>
